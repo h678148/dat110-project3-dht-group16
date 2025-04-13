@@ -45,8 +45,13 @@ public class Util {
 		
 		// Task: given an identifier, id: check whether pred < id <= node
 		
-		return false;
-
+		if (lower.compareTo(upper) < 0) {
+	        return id.compareTo(lower) >= 0 && id.compareTo(upper) <= 0;
+	    } else if (lower.compareTo(upper) > 0) {
+	        return id.compareTo(lower) >= 0 || id.compareTo(upper) <= 0;
+	    } else {
+	        return true;
+	    }
 	}
 	
 	public static List<String> toString(List<NodeInterface> list) throws RemoteException {

@@ -65,6 +65,14 @@ public class FileManager {
 		// hash the replica
 		
 		// store the hash in the replicafiles array.
+		
+		
+		for(int i = 0; i < Util.numReplicas; i++) {
+			String replica = filename + i;
+			BigInteger hash = Hash.hashOf(replica);
+            replicafiles[i] = hash;
+		}
+		
 	}
 	
     /**
@@ -97,6 +105,27 @@ public class FileManager {
     	// call the saveFileContent() on the successor and set isPrimary=true if logic above is true otherwise set isPrimary=false
     	
     	// increment counter
+    	
+    	
+    	createReplicaFiles();
+    	
+    	for (int i = 0; i < replicafiles.length; i++) {
+            BigInteger replicaId = replicafiles[i];
+            
+            NodeInterface successor = chordnode.findSuccessor(replicaId);
+            
+            if(successor != null) {
+            	successor.addKey(replicaId);
+            	
+            	boolean isPrimary = (i == index);
+            	
+            	successor.saveFileContent(filename, replicaId, bytesOfFile ,isPrimary);
+            	
+            	counter++;
+            }
+    	}
+    	
+    	
 		return counter;
     }
 	
@@ -123,6 +152,21 @@ public class FileManager {
 		
 		// save the metadata in the set activeNodesforFile.
 		
+		createReplicaFiles();
+		
+		for (BigInteger replica : replicafiles) {
+			
+			NodeInterface successor = chordnode.findSuccessor(replica);
+			
+			if (successor != null) {
+				Message metadata = successor.getFilesMetadata(replica);
+				
+				if (metadata != null) {
+					activeNodesforFile.add(metadata);
+				}
+			}
+		}
+		
 		return activeNodesforFile;
 	}
 	
@@ -130,7 +174,7 @@ public class FileManager {
 	 * Find the primary server - Remote-Write Protocol
 	 * @return 
 	 */
-	public NodeInterface findPrimaryOfItem() {
+	public NodeInterface findPrimaryOfItem() throws RemoteException {
 
 		// Task: Given all the active peers of a file (activeNodesforFile()), find which is holding the primary copy
 		
@@ -142,7 +186,14 @@ public class FileManager {
 		
 		// return the primary when found (i.e., use Util.getProcessStub to get the stub and return it)
 		
-		return null; 
+		if (activeNodesforFile != null) {
+	        for (Message m : activeNodesforFile) {
+	            if (m.isPrimaryServer()) {
+	                return Util.getProcessStub(m.getNodeName(), m.getPort());
+	            }
+	        }
+	    }
+	    return null;
 	}
 	
     /**

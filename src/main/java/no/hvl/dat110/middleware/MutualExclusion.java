@@ -1,6 +1,3 @@
-/**
- * 
- */
 package no.hvl.dat110.middleware;
 
 import java.math.BigInteger;
@@ -16,12 +13,8 @@ import no.hvl.dat110.rpc.interfaces.NodeInterface;
 import no.hvl.dat110.util.LamportClock;
 import no.hvl.dat110.util.Util;
 
-/**
- * @author tdoy
- *
- */
 public class MutualExclusion {
-		
+	
 	private static final Logger logger = LogManager.getLogger(MutualExclusion.class);
 	/** lock variables */
 	private boolean CS_BUSY = false;						// indicate to be in critical section (accessing a shared resource) 
@@ -79,6 +72,35 @@ public class MutualExclusion {
 		
 		// return permission
 		
+		queueack.clear();
+		mutexqueue.clear();
+		clock.increment();
+		
+		message.setClock(clock.getClock());
+		WANTS_TO_ENTER_CS = true;
+		
+		List<Message> activenodes = removeDuplicatePeersBeforeVoting();
+		multicastMessage(message, activenodes);
+		
+		// Wait for all messages to be acknowledged
+		int waited = 0;
+		while (!areAllMessagesReturned(activenodes.size()) && waited < 1000) {
+			try {
+				Thread.sleep(10); // wait a bit
+				waited += 10;
+			} catch (InterruptedException e) {
+				e.printStackTrace();
+			}
+		}
+		
+		// If all messages have been returned, acquire lock
+		if (areAllMessagesReturned(activenodes.size())) {
+			acquireLock();
+			node.broadcastUpdatetoPeers(message.getBytesOfFile());
+			mutexqueue.clear();
+			return true;
+		}
+	
 		return false;
 	}
 	
@@ -93,6 +115,15 @@ public class MutualExclusion {
 		
 		// call onMutexRequestReceived()
 		
+		for (Message m : activenodes) {
+			try {
+				NodeInterface stub = Util.getProcessStub(m.getNodeName(), m.getPort());
+				stub.onMutexRequestReceived(message);
+			} catch (Exception e) {
+				e.printStackTrace();
+			}
+		}
+		
 	}
 	
 	public void onMutexRequestReceived(Message message) throws RemoteException {
@@ -100,18 +131,22 @@ public class MutualExclusion {
 		// increment the local clock
 		
 		// if message is from self, acknowledge, and call onMutexAcknowledgementReceived()
-			
+		
+		clock.increment();
+		
+		if (message.getNodeID().equals(node.getNodeID())) {
+			message.setAcknowledged(true);
+			onMutexAcknowledgementReceived(message);
+			return;
+		}
+		
 		int caseid = -1;
 		
-		/* write if statement to transition to the correct caseid in the doDecisionAlgorithm */
+		if (!CS_BUSY && !WANTS_TO_ENTER_CS) caseid = 0;
+		else if (CS_BUSY) caseid = 1;
+		else if (WANTS_TO_ENTER_CS) caseid = 2;
 		
-			// caseid=0: Receiver is not accessing shared resource and does not want to (send OK to sender)
-		
-			// caseid=1: Receiver already has access to the resource (dont reply but queue the request)
-		
-			// caseid=2: Receiver wants to access resource but is yet to - compare own message clock to received message's clock
-		
-		// check for decision
+		// Check for decision based on caseid
 		doDecisionAlgorithm(message, mutexqueue, caseid);
 	}
 	
@@ -128,8 +163,15 @@ public class MutualExclusion {
 				// get a stub for the sender from the registry
 				
 				// acknowledge message
-				
 				// send acknowledgement back by calling onMutexAcknowledgementReceived()
+				
+				try {
+					NodeInterface stub = Util.getProcessStub(procName, port);
+					message.setAcknowledged(true);
+					stub.onMutexAcknowledgementReceived(message);
+				} catch (Exception e) {
+					e.printStackTrace();
+				}
 				
 				break;
 			}
@@ -138,39 +180,51 @@ public class MutualExclusion {
 			case 1: {
 				
 				// queue this message
+				queue.add(message);
 				break;
 			}
 			
 			/**
-			 *  case 3: Receiver wants to access resource but is yet to (compare own message clock to received message's clock
-			 *  the message with lower timestamp wins) - send OK if received is lower. Queue message if received is higher
+			 *  case 3: Receiver wants to access resource but is yet to - compare own message clock to received message's clock
+			 *  the message with lower timestamp wins
 			 */
 			case 2: {
 				
-				// check the clock of the sending process (note that the correct clock is in the received message)
-				
-				// own clock of the receiver (note that the correct clock is in the node's message)
-				
 				// compare clocks, the lowest wins
-				
 				// if clocks are the same, compare nodeIDs, the lowest wins
 				
-				// if sender wins, acknowledge the message, obtain a stub and call onMutexAcknowledgementReceived()
+				int senderClock = message.getClock();
+				int ownClock = node.getMessage().getClock();
 				
-				// if sender looses, queue it
+				if (senderClock < ownClock || (senderClock == ownClock &&
+						message.getNodeID().compareTo(node.getNodeID()) < 0)) {
+					try {
+						NodeInterface stub = Util.getProcessStub(procName, port);
+						message.setAcknowledged(true);
+						stub.onMutexAcknowledgementReceived(message);
+					} catch (Exception e) {
+						e.printStackTrace();
+					}
+				} else {
+					queue.add(message);
+				}
 
 				break;
 			}
-			
-			default: break;
 		}
-		
 	}
 	
 	public void onMutexAcknowledgementReceived(Message message) throws RemoteException {
 		
 		// add message to queueack
-		
+		if (!queueack.contains(message)) {
+			for (Message m : queueack) {
+				if (m.getNodeID().equals(message.getNodeID())) {
+					return; // already in the list
+				}
+			}
+			queueack.add(message);
+		}
 	}
 	
 	// multicast release locks message to other processes including self
@@ -178,10 +232,17 @@ public class MutualExclusion {
 		logger.info("Releasing locks from = "+activenodes.size());
 		
 		// iterate over the activenodes
-		
 		// obtain a stub for each node from the registry
-		
 		// call releaseLocks()	
+		
+		for (Message m : activenodes) {
+			try {
+				NodeInterface stub = Util.getProcessStub(m.getNodeName(), m.getPort());
+				stub.releaseLocks();
+			} catch (Exception e) {
+				e.printStackTrace();
+			}
+		}
 	}
 	
 	private boolean areAllMessagesReturned(int numvoters) throws RemoteException {
@@ -192,6 +253,11 @@ public class MutualExclusion {
 		// clear the queueack
 		
 		// return true if yes and false if no
+		
+		if (queueack.size() == numvoters) {
+			queueack.clear();
+			return true;
+		}
 		
 		return false;
 	}
